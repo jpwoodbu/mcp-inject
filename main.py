@@ -7,6 +7,8 @@ import fastapi
 import httpx
 import openai
 
+import duckduckgo
+
 
 _UPSTREAM_URL = "http://192.168.86.14:8000/v3/chat/completions"
 
@@ -24,8 +26,14 @@ async def chat_completions_proxy(
     request: fastapi.Request, background_tasks: fastapi.BackgroundTasks
 ):
     body = await request.json()
-    _inject_time_tool(body)
     headers = _filter_headers(request.headers)
+    _inject_time_tool(body)
+    async with duckduckgo.DuckDuckGo() as ddg:
+        tools = await ddg.list_tools()
+        for t in tools.tools:
+            _inject_function_tool(
+                body, t.name, t.description or "", t.inputSchema
+            )
 
     client = httpx.AsyncClient()
     # This task will be called after the response has been sent to the client.
@@ -42,7 +50,9 @@ async def chat_completions_proxy(
     )
 
 
-def _inject_time_tool(body: dict):
+def _inject_function_tool(
+    body: dict, name: str, description: str, parameters: dict | None = None
+):
     if "tools" not in body:
         body["tools"] = []
 
@@ -50,12 +60,17 @@ def _inject_time_tool(body: dict):
         {
             "type": "function",
             "function": {
-                "name": "get_current_time",
-                "description": "Get the current time",
-                "parameters": {"type": "object", "properties": {}},
+                "name": name,
+                "description": description,
+                "parameters": parameters
+                or {"type": "object", "properties": {}},
             },
         }
     )
+
+
+def _inject_time_tool(body: dict):
+    _inject_function_tool(body, "get_current_time", "Get the current time")
 
 
 def _filter_headers(headers) -> dict:
@@ -113,7 +128,7 @@ async def _proxy_generator(
     await response.aclose()
 
     if tool_calls:
-        _handle_tool_execution(body, tool_calls, content)
+        await _handle_tool_execution(body, tool_calls, content)
 
         # Send the result from tool calling to the LLM and get its tool informed
         # response to the original prompt.
@@ -157,7 +172,7 @@ def _update_tool_calls(tool_calls: dict, delta_tool_calls: list[dict]):
                 ]
 
 
-def _handle_tool_execution(body, tool_calls, content):
+async def _handle_tool_execution(body, tool_calls, content):
     if "messages" not in body:
         body["messages"] = []
 
@@ -179,6 +194,21 @@ def _handle_tool_execution(body, tool_calls, content):
                     "content": result,
                 }
             )
+        if tc["function"]["name"] == "search":
+            try:
+                args = json.loads(tc["function"]["arguments"])
+                async with duckduckgo.DuckDuckGo() as ddg:
+                    result = await ddg.search(args["query"])
+            except (json.JSONDecodeError, KeyError) as e:
+                result = f"Error processing tool arguments: {e}"
+            body["messages"].append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": str(result),
+                }
+            )
+
 
 
 def get_current_time():
