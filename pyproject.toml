@@ -8,5 +8,4 @@ dependencies = [
     "duckduckgo-mcp-server>=0.1.1",
     "fastapi[standard]>=0.129.0",
     "httpx>=0.28.1",
-    "openai>=2.17.0",
 ]
