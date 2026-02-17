@@ -17,8 +17,13 @@ app = fastapi.FastAPI()
 
 
 @app.get("/")
-def hello_world():
-    return "Hello, World!"
+def usage():
+    return fastapi.responses.HTMLResponse(
+        content="<p>Set your OpenAI API client to use <b>/v1/chat/completions</b></p>"
+    )
+
+
+# TODO(jpwoodbu) Add a handler for /v1/models
 
 
 @app.post("/v1/chat/completions")
