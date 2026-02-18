@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 import fastapi
 import httpx
 
-import duckduckgo
+from app import duckduckgo
 
 
 _UPSTREAM_URL = "http://192.168.86.14:8000/v3/chat/completions"
