@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 import datetime
 import json
+import logging
 
 import fastapi
 import httpx
@@ -13,6 +14,7 @@ from app import util
 _UPSTREAM_URL = "http://192.168.86.14:8000/v3/chat/completions"
 
 
+logger = logging.getLogger(__name__)
 app = fastapi.FastAPI()
 
 
@@ -143,9 +145,7 @@ async def _chat_completions_response_stream(
         yield "data: [DONE]\n\n"
 
 
-def _record_tool_call_requests(
-    requested_tool_calls: dict, delta: list[dict]
-):
+def _record_tool_call_requests(requested_tool_calls: dict, delta: list[dict]):
     """Updates the proxy's internal tool calls state.
 
     If the LLM decides to make a tool call, it will send that request along with
@@ -189,19 +189,31 @@ async def _handle_tool_execution(body: dict, tool_calls: dict, content: str):
 
     for tool_call in tool_calls.values():
         result = None
-        match tool_call["function"]["name"]:
-            case "get_current_time":
-                result = current_time.mcp_tool_result(tool_call["id"])
-            case "search":
-                id = tool_call["id"]
-                try:
-                    args = json.loads(tool_call["function"]["arguments"])
-                    result = await duckduckgo.mcp_tool_result(
-                        id, args["query"]
-                    )
-                except (json.JSONDecodeError, KeyError) as e:
-                    result = util.tool_call_result(
-                        id, f"Error processing tool arguments: {e}"
-                    )
+        if id := tool_call.get("id"):
+            match tool_call["function"]["name"]:
+                case "get_current_time":
+                    result = current_time.current_time(id)
+                case "search":
+                    try:
+                        args = json.loads(tool_call["function"]["arguments"])
+                        result = await duckduckgo.search(id, args["query"])
+                    except (json.JSONDecodeError, KeyError) as e:
+                        result = util.tool_call_result(
+                            id, f"Error processing tool arguments: {e}"
+                        )
+                case "fetch_content":
+                    logging.error("Running fetch_content")
+                    try:
+                        args = json.loads(tool_call["function"]["arguments"])
+                        result = await duckduckgo.fetch_content(
+                            id, args["url"]
+                        )
+                    except (json.JSONDecodeError, KeyError) as e:
+                        result = util.tool_call_result(
+                            id, f"Error processing tool arguments: {e}"
+                        )
+        else:
+            logger.error(f"Tool call missing required 'id' field: {tool_call}")
+
         if result:
             body["messages"].append(result)

@@ -41,8 +41,19 @@ class DuckDuckGo:
             "search", arguments={"query": query}
         )
 
+    async def fetch_content(self, url: str):
+        return await self.session.call_tool(
+            "fetch_content", arguments={"url": url}
+        )
 
-async def mcp_tool_result(id: str, query: str) -> dict:
+
+async def search(id: str, query: str) -> dict:
     async with DuckDuckGo() as ddg:
         result = await ddg.search(query)
+    return util.tool_call_result(id, str(result))
+
+
+async def fetch_content(id: str, url: str) -> dict:
+    async with DuckDuckGo() as ddg:
+        result = await ddg.fetch_content(url)
     return util.tool_call_result(id, str(result))
