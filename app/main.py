@@ -5,7 +5,9 @@ import json
 import fastapi
 import httpx
 
+from app import current_time
 from app import duckduckgo
+from app import util
 
 
 _UPSTREAM_URL = "http://192.168.86.14:8000/v3/chat/completions"
@@ -21,6 +23,30 @@ def usage():
     )
 
 
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    request: fastapi.Request, background_tasks: fastapi.BackgroundTasks
+):
+    """Proxies requests to the backend LLM, injecting tools."""
+    body = await request.json()
+    await _inject_tools(body)
+
+    client = httpx.AsyncClient()
+    headers = util.filter_headers(request.headers)
+    # This task will be called after the response has been sent to the client.
+    background_tasks.add_task(client.aclose)
+    proxy_request = client.build_request(
+        "POST", _UPSTREAM_URL, json=body, headers=headers
+    )
+    response = await client.send(proxy_request, stream=True)
+    return fastapi.responses.StreamingResponse(
+        _chat_completions_response_stream(client, response, body, headers),
+        status_code=response.status_code,
+        media_type=response.headers.get("content-type"),
+    )
+
+
+# TODO(jpwoodbu) Change this to fetch models from the backend model server.
 @app.get("/v1/models")
 def list_models():
     return {
@@ -36,76 +62,22 @@ def list_models():
     }
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions_proxy(
-    request: fastapi.Request, background_tasks: fastapi.BackgroundTasks
-):
-    body = await request.json()
-    headers = _filter_headers(request.headers)
-    _inject_time_tool(body)
+async def _inject_tools(body: dict):
+    """Make the LLM aware of the tools we can run."""
+    util.inject_function_tool(body, "get_current_time", "Get the current time")
+
     async with duckduckgo.DuckDuckGo() as ddg:
         tools = await ddg.list_tools()
         for t in tools.tools:
-            _inject_function_tool(
-                body, t.name, t.description or "", t.inputSchema
+            util.inject_function_tool(
+                body, t.name, t.description, t.inputSchema
             )
 
-    client = httpx.AsyncClient()
-    # This task will be called after the response has been sent to the client.
-    background_tasks.add_task(client.aclose)
-    proxy_request = client.build_request(
-        "POST", _UPSTREAM_URL, json=body, headers=headers
-    )
-    response = await client.send(proxy_request, stream=True)
 
-    return fastapi.responses.StreamingResponse(
-        _proxy_generator(client, response, body, headers),
-        status_code=response.status_code,
-        media_type=response.headers.get("content-type"),
-    )
-
-
-def _inject_function_tool(
-    body: dict, name: str, description: str, parameters: dict | None = None
-):
-    if "tools" not in body:
-        body["tools"] = []
-
-    body["tools"].append(
-        {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": parameters
-                or {"type": "object", "properties": {}},
-            },
-        }
-    )
-
-
-def _inject_time_tool(body: dict):
-    _inject_function_tool(body, "get_current_time", "Get the current time")
-
-
-def _filter_headers(headers) -> dict:
-    """Filter out headers which the Proxy may need to change.
-
-    The "Host" header likely always needs to be changed. The "Content-Length"
-    header will need to change if tool calling is injected.
-    """
-    return {
-        k: v
-        for k, v in headers.items()
-        # FastAPI, it seems, might lowercase all the headers.
-        if k.lower() not in ("host", "content-length")
-    }
-
-
-async def _proxy_generator(
+async def _chat_completions_response_stream(
     client, response, body, headers
 ) -> AsyncGenerator[str, None]:
-    tool_calls = {}
+    requested_tool_calls = {}
     content = ""
 
     async for line in response.aiter_lines():
@@ -116,11 +88,16 @@ async def _proxy_generator(
             yield line + "\n"
         else:
             payload = line[6:].strip()
+            # Don't pass along a `[DONE]` message just yet as we may need to
+            # process a tool call request and include the LLM's tool call
+            # informed response in this stream.
             if payload == "[DONE]":
                 continue
 
             try:
                 chunk = json.loads(payload)
+            # If we don't get back valid JSON, yield what we got unmodified for
+            # the client to deal with it.
             except json.JSONDecodeError:
                 yield line + "\n"
 
@@ -131,99 +108,100 @@ async def _proxy_generator(
                 content += delta["content"]
 
             if delta.get("tool_calls"):
-                _update_tool_calls(tool_calls, delta["tool_calls"])
+                _record_tool_call_requests(
+                    requested_tool_calls, delta["tool_calls"]
+                )
 
-            # Suppress tool calls and the stop reason associated with
-            # them
+            # Suppress tool calls and the stop reason associated with them which
+            # the client shouldn't see since it didn't offer the tool calls.
             if delta.get("tool_calls") or finish_reason == "tool_calls":
                 continue
 
+            # If this chunk wasn't about tool calls, pass it along.
             yield line + "\n"
 
     await response.aclose()
 
-    if tool_calls:
-        await _handle_tool_execution(body, tool_calls, content)
+    if requested_tool_calls:
+        await _handle_tool_execution(body, requested_tool_calls, content)
 
         # Send the result from tool calling to the LLM and get its tool informed
-        # response to the original prompt.
-        tc_result_request = client.build_request(
+        # response for the original prompt.
+        tool_call_result_request = client.build_request(
             "POST", _UPSTREAM_URL, json=body, headers=headers
         )
-        informed_response = await client.send(tc_result_request, stream=True)
+        informed_response = await client.send(
+            tool_call_result_request, stream=True
+        )
+        # Stream the entire informed repsonse, which would include a `[DONE]`
+        # message.
         async for line in informed_response.aiter_lines():
             yield line + "\n"
         await informed_response.aclose()
+    # In the event there was no tool calling, indicate the stream is done.
     else:
         yield "data: [DONE]\n\n"
 
 
-def _update_tool_calls(tool_calls: dict, delta_tool_calls: list[dict]):
+def _record_tool_call_requests(
+    requested_tool_calls: dict, delta: list[dict]
+):
     """Updates the proxy's internal tool calls state.
 
     If the LLM decides to make a tool call, it will send that request along with
     an ID string which is included in the next request to the LLM along with the
     content generated by the tool.
+
+    Note that this function uses the streaming protocol and accepts message
+    deltas, not necessarily complete messages.
     """
-    for tc in delta_tool_calls:
-        # TODO(jpwoodbu) Dig deeper as to what "index" is. I thought the list of
-        # tool calls was a literal list.
-        idx = tc["index"]
-        if idx not in tool_calls:
-            tool_calls[idx] = {
+    for tool_call in delta:
+        # The `index` seems redunant with the `id`, but it's used as part of the
+        # streaming API. It's used for demultiplexing.
+        idx = tool_call["index"]
+        if idx not in requested_tool_calls:
+            requested_tool_calls[idx] = {
                 "id": "",
                 "type": "function",
                 "function": {"name": "", "arguments": ""},
             }
-        if tc.get("id"):
+        requested_tool_call = requested_tool_calls[idx]
+        if id := tool_call.get("id"):
             # id is not streamed, the = operator is safe.
-            tool_calls[idx]["id"] = tc["id"]
-        if tc.get("function"):
-            if tc["function"].get("name"):
-                tool_calls[idx]["function"]["name"] += tc["function"]["name"]
-            if tc["function"].get("arguments"):
-                tool_calls[idx]["function"]["arguments"] += tc["function"][
-                    "arguments"
-                ]
+            requested_tool_call["id"] = id
+        if function := tool_call.get("function"):
+            if name := function.get("name"):
+                requested_tool_call["function"]["name"] += name
+            if arguments := function.get("arguments"):
+                requested_tool_call["function"]["arguments"] += arguments
 
 
-async def _handle_tool_execution(body, tool_calls, content):
+async def _handle_tool_execution(body: dict, tool_calls: dict, content: str):
     if "messages" not in body:
         body["messages"] = []
 
     assistant_msg = {
         "role": "assistant",
         "content": content if content else None,
-        "tool_calls": [tool_calls[i] for i in sorted(tool_calls.keys())],
+        "tool_calls": list(tool_calls.values()),
     }
     body["messages"].append(assistant_msg)
 
-    for idx in sorted(tool_calls.keys()):
-        tc = tool_calls[idx]
-        if tc["function"]["name"] == "get_current_time":
-            result = get_current_time()
-            body["messages"].append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                }
-            )
-        if tc["function"]["name"] == "search":
-            try:
-                args = json.loads(tc["function"]["arguments"])
-                async with duckduckgo.DuckDuckGo() as ddg:
-                    result = await ddg.search(args["query"])
-            except (json.JSONDecodeError, KeyError) as e:
-                result = f"Error processing tool arguments: {e}"
-            body["messages"].append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": str(result),
-                }
-            )
-
-
-def get_current_time():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for tool_call in tool_calls.values():
+        result = None
+        match tool_call["function"]["name"]:
+            case "get_current_time":
+                result = current_time.mcp_tool_result(tool_call["id"])
+            case "search":
+                id = tool_call["id"]
+                try:
+                    args = json.loads(tool_call["function"]["arguments"])
+                    result = await duckduckgo.mcp_tool_result(
+                        id, args["query"]
+                    )
+                except (json.JSONDecodeError, KeyError) as e:
+                    result = util.tool_call_result(
+                        id, f"Error processing tool arguments: {e}"
+                    )
+        if result:
+            body["messages"].append(result)

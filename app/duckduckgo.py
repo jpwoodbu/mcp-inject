@@ -1,7 +1,11 @@
-from contextlib import AsyncExitStack
+"""Interface to the DuckDuckGo MCP server"""
+
+import contextlib
 
 import mcp
 from mcp.client import stdio as mcp_stdio
+
+from app import util
 
 
 _SERVER_COMMAND = "duckduckgo-mcp-server"
@@ -14,7 +18,7 @@ class DuckDuckGo:
         self.server_params = mcp.StdioServerParameters(
             command=_SERVER_COMMAND, args=_SERVER_ARGS, env=None
         )
-        self._exit_stack = AsyncExitStack()
+        self._exit_stack = contextlib.AsyncExitStack()
 
     async def __aenter__(self):
         read, write = await self._exit_stack.enter_async_context(
@@ -29,8 +33,16 @@ class DuckDuckGo:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._exit_stack.aclose()
 
-    async def list_tools(self):
+    async def list_tools(self) -> mcp.types.ListToolsResult:
         return await self.session.list_tools()
 
     async def search(self, query: str):
-        return await self.session.call_tool("search", arguments={"query": query})
+        return await self.session.call_tool(
+            "search", arguments={"query": query}
+        )
+
+
+async def mcp_tool_result(id: str, query: str) -> dict:
+    async with DuckDuckGo() as ddg:
+        result = await ddg.search(query)
+    return util.tool_call_result(id, str(result))
