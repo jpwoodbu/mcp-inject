@@ -1,6 +1,6 @@
+from collections.abc import AsyncGenerator
 import datetime
 import json
-from collections.abc import AsyncGenerator
 
 import fastapi
 import httpx
@@ -215,66 +215,3 @@ async def _handle_tool_execution(body, tool_calls, content):
 
 def get_current_time():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def process_stream(stream):
-    content = ""
-    tool_calls = {}
-
-    for chunk in stream:
-        delta = chunk.choices[0].delta
-
-        if getattr(delta, "reasoning_content", None):
-            # print(
-            #     f"\033[94m{delta.reasoning_content}\033[0m", end="", flush=True
-            # )
-            pass
-
-        if delta.content is not None:
-            print(delta.content, end="", flush=True)
-            content += delta.content
-
-        update_tool_calls(delta, tool_calls)
-
-    print()  # Add a newline at the end
-
-    message = {
-        "role": "assistant",
-        "content": content if content else None,
-    }
-    if tool_calls:
-        message["tool_calls"] = [
-            tool_calls[i] for i in sorted(tool_calls.keys())
-        ]
-    return message
-
-
-def update_tool_calls(delta, tool_calls):
-    """Populate the `tool_calls` dict from a single delta."""
-    if not delta.tool_calls:
-        return
-
-    for tool_call in delta.tool_calls:
-        index = tool_call.index
-        if index not in tool_calls:
-            # initialise a fresh entry
-            tool_calls[index] = {
-                "id": "",
-                "type": "function",
-                "function": {"name": "", "arguments": ""},
-            }
-
-        # copy the fields that are present
-        if tool_call.id:
-            tool_calls[index]["id"] = tool_call.id
-        if tool_call.type:
-            tool_calls[index]["type"] = tool_call.type
-        if tool_call.function:
-            if tool_call.function.name:
-                tool_calls[index]["function"][
-                    "name"
-                ] += tool_call.function.name
-            if tool_call.function.arguments:
-                tool_calls[index]["function"][
-                    "arguments"
-                ] += tool_call.function.arguments
