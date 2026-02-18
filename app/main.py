@@ -21,7 +21,19 @@ def usage():
     )
 
 
-# TODO(jpwoodbu) Add a handler for /v1/models
+@app.get("/v1/models")
+def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "qwen3",
+                "object": "model",
+                "created": int(datetime.datetime.now().timestamp()),
+                "owned_by": "system",
+            }
+        ],
+    }
 
 
 @app.post("/v1/chat/completions")
