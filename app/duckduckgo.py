@@ -4,8 +4,8 @@ import mcp
 from mcp.client import stdio as mcp_stdio
 
 
-_SERVER_COMMAND = "uv"  # or "node", "uv", etc.
-_SERVER_ARGS = ["run", "duckduckgo-mcp-server"]
+_SERVER_COMMAND = "duckduckgo-mcp-server"
+_SERVER_ARGS = []
 
 
 class DuckDuckGo:
