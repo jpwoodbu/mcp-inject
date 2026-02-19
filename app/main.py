@@ -2,6 +2,7 @@ from collections.abc import AsyncGenerator
 import datetime
 import json
 import logging
+import os
 
 import fastapi
 import httpx
@@ -11,7 +12,7 @@ from app import duckduckgo
 from app import util
 
 
-_UPSTREAM_URL = "http://192.168.86.14:8000/v3/chat/completions"
+_BACKEND_URL = os.environ.get("MCP_INJECT_BACKEND_URL")
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,9 @@ async def chat_completions(
     request: fastapi.Request, background_tasks: fastapi.BackgroundTasks
 ):
     """Proxies requests to the backend LLM, injecting tools."""
+    if _BACKEND_URL is None:
+        raise ValueError("MCP_INJECT_BACKEND_URL must be set")
+
     body = await request.json()
     await _inject_tools(body)
 
@@ -38,7 +42,7 @@ async def chat_completions(
     # This task will be called after the response has been sent to the client.
     background_tasks.add_task(client.aclose)
     proxy_request = client.build_request(
-        "POST", _UPSTREAM_URL, json=body, headers=headers
+        "POST", _BACKEND_URL, json=body, headers=headers
     )
     response = await client.send(proxy_request, stream=True)
     return fastapi.responses.StreamingResponse(
@@ -130,7 +134,7 @@ async def _chat_completions_response_stream(
         # Send the result from tool calling to the LLM and get its tool informed
         # response for the original prompt.
         tool_call_result_request = client.build_request(
-            "POST", _UPSTREAM_URL, json=body, headers=headers
+            "POST", _BACKEND_URL, json=body, headers=headers
         )
         informed_response = await client.send(
             tool_call_result_request, stream=True
