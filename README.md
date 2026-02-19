@@ -19,6 +19,10 @@ Set the `MCP_INJECT_BACKEND_URL` environment variable to the base URL of your
 model server. For example, `http://127.0.0.1:8000/v1`. URL paths like
 `/chat/completions` will be suffixed to the provided URL.
 
+If running in Docker, it's recommended to set the `TZ` environment variable as
+well, as that impacts the _current time_ tool. For example,
+`TZ=America/New_York`.
+
 ## Starting the proxy server
 If you have `uv` installed, you can start the server like so:
 ```sh
