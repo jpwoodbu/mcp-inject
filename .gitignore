@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Config file to set environment variables for the server
+envvars.sh
