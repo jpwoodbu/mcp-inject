@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+import contextlib
 import json
 import logging
 import os
@@ -16,7 +17,16 @@ _COMPLETIONS_URL: str = _BACKEND_URL + "/chat/completions"
 
 
 logger = logging.getLogger(__name__)
-app = fastapi.FastAPI()
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: fastapi.FastAPI):
+    async with duckduckgo.DuckDuckGo() as ddg:
+        app.state.ddg = ddg
+        yield
+
+
+app = fastapi.FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
@@ -34,8 +44,9 @@ async def chat_completions(
     if not _BACKEND_URL:
         raise ValueError("env var MCP_INJECT_BACKEND_URL must be set")
 
+    ddg = request.app.state.ddg
     body = await request.json()
-    await _inject_tools(body)
+    await _inject_tools(body, ddg)
 
     client = httpx.AsyncClient()
     headers = util.filter_headers(request.headers)
@@ -46,7 +57,7 @@ async def chat_completions(
     )
     response = await client.send(proxy_request, stream=True)
     return fastapi.responses.StreamingResponse(
-        _chat_completions_response_stream(client, response, body, headers),
+        _chat_completions_response_stream(client, response, body, headers, ddg),
         status_code=response.status_code,
         media_type=response.headers.get("content-type"),
     )
@@ -78,20 +89,19 @@ async def proxy_catch_all(request: fastapi.Request, path: str):
     )
 
 
-async def _inject_tools(body: dict):
+async def _inject_tools(body: dict, ddg: duckduckgo.DuckDuckGo):
     """Make the LLM aware of the tools we can run."""
     util.inject_function_tool(body, "get_current_time", "Get the current time")
 
-    async with duckduckgo.DuckDuckGo() as ddg:
-        tools = await ddg.list_tools()
-        for t in tools.tools:
-            util.inject_function_tool(
-                body, t.name, t.description, t.inputSchema
-            )
+    tools = await ddg.list_tools()
+    for t in tools.tools:
+        util.inject_function_tool(
+            body, t.name, t.description, t.inputSchema
+        )
 
 
 async def _chat_completions_response_stream(
-    client, response, body, headers
+    client, response, body, headers, ddg
 ) -> AsyncGenerator[str, None]:
     requested_tool_calls = {}
     content = ""
@@ -139,7 +149,7 @@ async def _chat_completions_response_stream(
     await response.aclose()
 
     if requested_tool_calls:
-        await _handle_tool_execution(body, requested_tool_calls, content)
+        await _handle_tool_execution(body, requested_tool_calls, content, ddg)
 
         # Send the result from tool calling to the LLM and get its tool informed
         # response for the original prompt.
@@ -190,7 +200,9 @@ def _record_tool_call_requests(requested_tool_calls: dict, delta: list[dict]):
                 requested_tool_call["function"]["arguments"] += arguments
 
 
-async def _handle_tool_execution(body: dict, tool_calls: dict, content: str):
+async def _handle_tool_execution(
+    body: dict, tool_calls: dict, content: str, ddg: duckduckgo.DuckDuckGo
+):
     if "messages" not in body:
         body["messages"] = []
 
@@ -210,7 +222,8 @@ async def _handle_tool_execution(body: dict, tool_calls: dict, content: str):
                 case "search":
                     try:
                         args = json.loads(tool_call["function"]["arguments"])
-                        result = await duckduckgo.search(id, args["query"])
+                        search_result = await ddg.search(args["query"])
+                        result = util.tool_call_result(id, str(search_result))
                     except (json.JSONDecodeError, KeyError) as e:
                         result = util.tool_call_result(
                             id, f"Error processing tool arguments: {e}"
@@ -218,9 +231,8 @@ async def _handle_tool_execution(body: dict, tool_calls: dict, content: str):
                 case "fetch_content":
                     try:
                         args = json.loads(tool_call["function"]["arguments"])
-                        result = await duckduckgo.fetch_content(
-                            id, args["url"]
-                        )
+                        fetch_result = await ddg.fetch_content(args["url"])
+                        result = util.tool_call_result(id, str(fetch_result))
                     except (json.JSONDecodeError, KeyError) as e:
                         result = util.tool_call_result(
                             id, f"Error processing tool arguments: {e}"

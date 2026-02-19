@@ -5,8 +5,6 @@ import contextlib
 import mcp
 from mcp.client import stdio as mcp_stdio
 
-from app import util
-
 
 _SERVER_COMMAND = "duckduckgo-mcp-server"
 _SERVER_ARGS = []
@@ -45,15 +43,3 @@ class DuckDuckGo:
         return await self.session.call_tool(
             "fetch_content", arguments={"url": url}
         )
-
-
-async def search(id: str, query: str) -> dict:
-    async with DuckDuckGo() as ddg:
-        result = await ddg.search(query)
-    return util.tool_call_result(id, str(result))
-
-
-async def fetch_content(id: str, url: str) -> dict:
-    async with DuckDuckGo() as ddg:
-        result = await ddg.fetch_content(url)
-    return util.tool_call_result(id, str(result))
