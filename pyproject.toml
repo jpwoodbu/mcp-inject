@@ -1,7 +1,7 @@
 [project]
 name = "mcp-inject"
 version = "0.1.0"
-description = "Add your description here"
+description = "A proxy server that injects tools into the context for an LLM"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
