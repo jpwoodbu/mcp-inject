@@ -202,7 +202,6 @@ async def _handle_tool_execution(body: dict, tool_calls: dict, content: str):
                             id, f"Error processing tool arguments: {e}"
                         )
                 case "fetch_content":
-                    logging.error("Running fetch_content")
                     try:
                         args = json.loads(tool_call["function"]["arguments"])
                         result = await duckduckgo.fetch_content(
