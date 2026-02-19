@@ -12,7 +12,8 @@ from app import duckduckgo
 from app import util
 
 
-_BACKEND_URL = os.environ.get("MCP_INJECT_BACKEND_URL")
+_BACKEND_URL: str = os.environ.get("MCP_INJECT_BACKEND_URL", "")
+_COMPLETIONS_URL: str = _BACKEND_URL + "/chat/completions"
 
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,8 @@ async def chat_completions(
     request: fastapi.Request, background_tasks: fastapi.BackgroundTasks
 ):
     """Proxies requests to the backend LLM, injecting tools."""
-    if _BACKEND_URL is None:
-        raise ValueError("MCP_INJECT_BACKEND_URL must be set")
+    if not _BACKEND_URL:
+        raise ValueError("env var MCP_INJECT_BACKEND_URL must be set")
 
     body = await request.json()
     await _inject_tools(body)
@@ -42,7 +43,7 @@ async def chat_completions(
     # This task will be called after the response has been sent to the client.
     background_tasks.add_task(client.aclose)
     proxy_request = client.build_request(
-        "POST", _BACKEND_URL, json=body, headers=headers
+        "POST", _COMPLETIONS_URL, json=body, headers=headers
     )
     response = await client.send(proxy_request, stream=True)
     return fastapi.responses.StreamingResponse(
@@ -52,20 +53,30 @@ async def chat_completions(
     )
 
 
-# TODO(jpwoodbu) Change this to fetch models from the backend model server.
-@app.get("/v1/models")
-def list_models():
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "qwen3",
-                "object": "model",
-                "created": int(datetime.datetime.now().timestamp()),
-                "owned_by": "system",
-            }
-        ],
-    }
+# This catch all handler MUST be defined after more specific handlers.
+@app.api_route("/{path:path}", methods=["GET", "POST"])
+async def proxy_catch_all(request: fastapi.Request, path: str):
+    if not _BACKEND_URL:
+        raise ValueError("env var MCP_INJECT_BACKEND_URL must be set")
+
+    headers = util.filter_headers(request.headers)
+
+    async with httpx.AsyncClient() as client:
+        content = await request.body()
+        proxy_request = client.build_request(
+            request.method,
+            f"{_BACKEND_URL}/{path}",
+            headers=headers,
+            content=content,
+            params=request.query_params,
+        )
+        response = await client.send(proxy_request)
+
+    return fastapi.responses.Response(
+        content=response.content,
+        status_code=response.status_code,
+        media_type=response.headers.get("content-type"),
+    )
 
 
 async def _inject_tools(body: dict):
@@ -134,7 +145,7 @@ async def _chat_completions_response_stream(
         # Send the result from tool calling to the LLM and get its tool informed
         # response for the original prompt.
         tool_call_result_request = client.build_request(
-            "POST", _BACKEND_URL, json=body, headers=headers
+            "POST", _COMPLETIONS_URL, json=body, headers=headers
         )
         informed_response = await client.send(
             tool_call_result_request, stream=True
