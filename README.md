@@ -1,5 +1,8 @@
 # MCP Inject
 
+> [!NOTE]
+> This project has been archived. It's mostly obsolete as most OpenAI API clients now support MCP directly.
+
 An OpenAI API proxy server that injects tools into the context using MCP.
 
 The use case this was made for was to add web search to Home Assistant's Voice
